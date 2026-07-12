@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useCallback } from "react";
+import { supabase } from "./supabase.js";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -85,6 +86,23 @@ function CategoryChip({ name }) {
     </span>
   );
 }
+
+const EXPENSE_CATEGORIES = [
+  ["advertising", "Advertising"], ["fuel", "Fuel"], ["office_supplies", "Office supplies"],
+  ["equipment", "Equipment"], ["rent", "Rent"], ["payroll", "Payroll"], ["meals", "Meals"],
+  ["travel", "Travel"], ["insurance", "Insurance"], ["utilities", "Utilities"],
+  ["software", "Software"], ["taxes", "Taxes"], ["inventory", "Inventory"],
+  ["supplies", "Supplies"], ["other", "Other"],
+];
+const CATEGORY_LABELS = Object.fromEntries(EXPENSE_CATEGORIES);
+const PAYMENT_METHODS = ["Card", "Cash", "ACH", "Check", "Auto-pay", "Other"];
+
+const prettyDate = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+};
+const todayISO = () => new Date().toISOString().slice(0, 10);
 
 const statusStyle = {
   Paid: "bg-[#E8F3EC] text-[#1F7A5C]",
@@ -305,73 +323,209 @@ function DashboardPage() {
   );
 }
 
-function ExpensesPage() {
+function ExpensesPage({ business }) {
+  const live = !!(supabase && business);
   const [query, setQuery] = useState("");
-  const filtered = transactions.filter((t) =>
-    t.merchant.toLowerCase().includes(query.toLowerCase())
-  );
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(live);
+  const [error, setError] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    merchant: "", amount: "", date: todayISO(), category: "other",
+    payment_method: "Card", notes: "",
+  });
+
+  const load = useCallback(async () => {
+    if (!live) return;
+    setLoading(true);
+    setError(null);
+    const { data, error: err } = await supabase
+      .from("expenses")
+      .select("*")
+      .order("date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (err) setError(err.message);
+    else setRows(data || []);
+    setLoading(false);
+  }, [live]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!form.merchant || !form.amount) { setError("Merchant and amount are required."); return; }
+    setSaving(true);
+    setError(null);
+    const { error: err } = await supabase.from("expenses").insert({
+      business_id: business.id,
+      merchant: form.merchant,
+      amount: parseFloat(form.amount),
+      date: form.date,
+      category: form.category,
+      payment_method: form.payment_method,
+      notes: form.notes || null,
+    });
+    setSaving(false);
+    if (err) { setError(err.message); return; }
+    setForm({ merchant: "", amount: "", date: todayISO(), category: "other", payment_method: "Card", notes: "" });
+    setShowForm(false);
+    load();
+  };
+
+  const remove = async (id) => {
+    setError(null);
+    const { error: err } = await supabase.from("expenses").delete().eq("id", id);
+    if (err) setError(err.message);
+    else setRows((r) => r.filter((x) => x.id !== id));
+  };
+
+  // Demo fallback when not logged in / no database
+  const demoRows = transactions.filter((t) => t.amount < 0).map((t) => ({
+    id: t.id, merchant: t.merchant, category: t.category.toLowerCase(), date: t.date,
+    payment_method: t.method, status: t.status, amount: Math.abs(t.amount), _demo: true,
+  }));
+  const source = live ? rows : demoRows;
+  const filtered = source.filter((t) => t.merchant.toLowerCase().includes(query.toLowerCase()));
+  const monthTotal = source.reduce((s, r) => s + Number(r.amount), 0);
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-['Roboto_Slab'] text-[22px] text-[#1C2B33]">Expenses</h1>
-          <p className="text-[13px] text-[#6B7680] mt-0.5">Track and categorize every dollar out.</p>
+          <p className="text-[13px] text-[#6B7680] mt-0.5">
+            {live ? "Saved to your books in real time." : "Demo data — log in to track your own."}
+          </p>
         </div>
         <div className="flex gap-2">
           <button className="flex items-center gap-2 bg-white border border-[#E7E1D4] text-[#1C2B33] text-[13px] font-medium px-3.5 py-2.5 rounded-lg hover:bg-[#F7F3E9] transition-colors">
             <Camera size={15} /> Scan receipt
           </button>
-          <button className="flex items-center gap-2 bg-[#1C2B33] text-white text-[13px] font-medium px-3.5 py-2.5 rounded-lg hover:bg-[#243944] transition-colors">
+          <button
+            onClick={() => live && setShowForm((s) => !s)}
+            className="flex items-center gap-2 bg-[#1C2B33] text-white text-[13px] font-medium px-3.5 py-2.5 rounded-lg hover:bg-[#243944] transition-colors disabled:opacity-50"
+            disabled={!live}
+          >
             <Plus size={15} /> New expense
           </button>
         </div>
       </div>
 
+      {error && (
+        <div className="flex items-center gap-2 bg-[#F8E9E4] text-[#B5533C] text-[13px] px-4 py-3 rounded-lg">
+          <AlertCircle size={15} /> {error}
+        </div>
+      )}
+
+      {showForm && (
+        <LedgerCard className="p-5 pt-6 border-2 !border-[#1C2B33]">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-[14px] font-medium text-[#1C2B33]">New expense</h3>
+            <button onClick={() => setShowForm(false)} className="text-[#8B9199] hover:text-[#1C2B33]"><X size={16} /></button>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Merchant</label>
+              <input value={form.merchant} onChange={(e) => setForm({ ...form, merchant: e.target.value })}
+                placeholder="Sysco Foods"
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33]" />
+            </div>
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Amount</label>
+              <input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value.replace(/[^0-9.]/g, "") })}
+                placeholder="128.50"
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33] tabular-nums" />
+            </div>
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Date</label>
+              <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33]" />
+            </div>
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Category</label>
+              <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33]">
+                {EXPENSE_CATEGORIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Payment method</label>
+              <select value={form.payment_method} onChange={(e) => setForm({ ...form, payment_method: e.target.value })}
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33]">
+                {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-[12px] text-[#6B7680] block mb-1">Notes (optional)</label>
+              <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                placeholder="Weekly produce order"
+                className="w-full text-[13px] border border-[#E7E1D4] rounded-lg px-3 py-2 outline-none bg-white focus:border-[#1C2B33]" />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setShowForm(false)} className="text-[13px] text-[#6B7680] px-4 py-2 rounded-lg hover:bg-[#F7F3E9]">Cancel</button>
+            <button onClick={save} disabled={saving}
+              className="text-[13px] font-medium bg-[#1F7A5C] text-white px-4 py-2 rounded-lg hover:bg-[#1A6A50] disabled:opacity-60">
+              {saving ? "Saving..." : "Save expense"}
+            </button>
+          </div>
+        </LedgerCard>
+      )}
+
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-2 bg-white border border-[#E7E1D4] rounded-lg px-3 py-2 flex-1 max-w-xs">
           <Search size={15} className="text-[#8B9199]" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search merchants"
-            className="text-[13px] outline-none bg-transparent w-full placeholder:text-[#8B9199]"
-          />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search merchants"
+            className="text-[13px] outline-none bg-transparent w-full placeholder:text-[#8B9199]" />
         </div>
-        <button className="flex items-center gap-1.5 text-[13px] text-[#1C2B33] border border-[#E7E1D4] bg-white px-3 py-2 rounded-lg hover:bg-[#F7F3E9]">
-          <Filter size={14} /> Filter
-        </button>
-        <button className="flex items-center gap-1.5 text-[13px] text-[#1C2B33] border border-[#E7E1D4] bg-white px-3 py-2 rounded-lg hover:bg-[#F7F3E9] ml-auto">
-          <Download size={14} /> Export CSV
-        </button>
+        <span className="text-[13px] text-[#6B7680] ml-auto">
+          Total: <span className="font-medium text-[#1C2B33] tabular-nums">{currency(monthTotal)}</span>
+        </span>
       </div>
 
       <LedgerCard className="pt-6 overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="text-[12px] text-[#6B7680] border-b border-[#EFEADD]">
-              <th className="font-medium px-5 pb-3">Merchant</th>
-              <th className="font-medium px-5 pb-3">Category</th>
-              <th className="font-medium px-5 pb-3">Method</th>
-              <th className="font-medium px-5 pb-3">Date</th>
-              <th className="font-medium px-5 pb-3">Status</th>
-              <th className="font-medium px-5 pb-3 text-right">Amount</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[#EFEADD]">
-            {filtered.map((t) => (
-              <tr key={t.id} className="text-[13px] hover:bg-[#FBF8F1]">
-                <td className="px-5 py-3 text-[#1C2B33] font-medium">{t.merchant}</td>
-                <td className="px-5 py-3"><CategoryChip name={t.category} /></td>
-                <td className="px-5 py-3 text-[#6B7680]">{t.method}</td>
-                <td className="px-5 py-3 text-[#6B7680]">{t.date}</td>
-                <td className="px-5 py-3"><StatusPill status={t.status} /></td>
-                <td className={`px-5 py-3 text-right font-medium tabular-nums ${t.amount > 0 ? "text-[#1F7A5C]" : "text-[#1C2B33]"}`}>
-                  {currency(t.amount)}
-                </td>
+        {loading ? (
+          <p className="text-[13px] text-[#6B7680] px-5 py-8 text-center">Loading your expenses...</p>
+        ) : filtered.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <p className="text-[14px] text-[#1C2B33] font-medium mb-1">No expenses yet</p>
+            <p className="text-[13px] text-[#6B7680]">Click "New expense" to record your first one.</p>
+          </div>
+        ) : (
+          <table className="w-full text-left">
+            <thead>
+              <tr className="text-[12px] text-[#6B7680] border-b border-[#EFEADD]">
+                <th className="font-medium px-5 pb-3">Merchant</th>
+                <th className="font-medium px-5 pb-3">Category</th>
+                <th className="font-medium px-5 pb-3">Method</th>
+                <th className="font-medium px-5 pb-3">Date</th>
+                <th className="font-medium px-5 pb-3 text-right">Amount</th>
+                <th className="px-5 pb-3"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-[#EFEADD]">
+              {filtered.map((t) => (
+                <tr key={t.id} className="text-[13px] hover:bg-[#FBF8F1]">
+                  <td className="px-5 py-3 text-[#1C2B33] font-medium">
+                    {t.merchant}
+                    {t.notes && <span className="block text-[11px] text-[#8B9199] font-normal">{t.notes}</span>}
+                  </td>
+                  <td className="px-5 py-3"><CategoryChip name={CATEGORY_LABELS[t.category] || t.category} /></td>
+                  <td className="px-5 py-3 text-[#6B7680]">{t.payment_method}</td>
+                  <td className="px-5 py-3 text-[#6B7680]">{t._demo ? t.date : prettyDate(t.date)}</td>
+                  <td className="px-5 py-3 text-right font-medium tabular-nums text-[#1C2B33]">{currency(Number(t.amount))}</td>
+                  <td className="px-5 py-3 text-right">
+                    {live && (
+                      <button onClick={() => remove(t.id)} title="Delete" className="text-[#C6BFB0] hover:text-[#B5533C]">
+                        <X size={15} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </LedgerCard>
     </div>
   );
@@ -1181,15 +1335,29 @@ const NAV = [
 export default function ProfitPilot({ session, onSignOut }) {
   const userEmail = session?.user?.email || "you@yourbusiness.com";
   const initials = userEmail.slice(0, 2).toUpperCase();
-  const [view, setView] = useState("landing");
+  const [view, setView] = useState(session ? "app" : "landing");
   const [page, setPage] = useState("dashboard");
   const [subscribed, setSubscribed] = useState(false);
+  const [business, setBusiness] = useState(null);
+
+  useEffect(() => {
+    if (!supabase || !session) return;
+    (async () => {
+      const { data } = await supabase.from("businesses").select("*").limit(1);
+      if (data && data.length) { setBusiness(data[0]); return; }
+      const { data: created } = await supabase
+        .from("businesses")
+        .insert({ owner_id: session.user.id, name: "My business" })
+        .select();
+      if (created && created.length) setBusiness(created[0]);
+    })();
+  }, [session]);
 
   const content = useMemo(() => {
     switch (page) {
       case "dashboard": return <DashboardPage />;
       case "revenue": return <RevenuePage />;
-      case "expenses": return <ExpensesPage />;
+      case "expenses": return <ExpensesPage business={business} />;
       case "invoices": return <InvoicesPage />;
       case "customers": return <CustomersPage />;
       case "reports": return <ReportsPage />;
@@ -1198,7 +1366,7 @@ export default function ProfitPilot({ session, onSignOut }) {
       case "settings": return <SettingsPage />;
       default: return <DashboardPage />;
     }
-  }, [page, subscribed]);
+  }, [page, subscribed, business]);
 
   if (view === "landing") return <LandingPage onEnter={() => setView("app")} />;
 
